@@ -20,8 +20,88 @@ from overkill.sources import Source
 import subprocess
 import re
 
+
+SINK_MATCHER = re.compile(r"^Event '(new|remove|change)' on sink #([0-9]+)$")
+SOURCE_MATCHER = re.compile(r"^Event '(new|remove|change)' on source #([0-9]+)$")
+
+def _process_sinks(line):
+    match = SINK_MATCHER.match(line)
+    if not match:
+        return {}
+    event, sink = match.groups()
+    updates = _get_sink_updates()
+    updates.update(_get_updates_for_sink(sink))
+    return updates
+
+def _process_sources(line):
+    match = SOURCE_MATCHER.match(line)
+    if not match:
+        return {}
+    event, source = match.groups()
+    updates = _get_source_updates()
+    updates.update(_get_updates_for_source(source))
+    return updates
+
+def _get_updates_for_source(source):
+    volume = int(subprocess.check_output(
+        ["ponymix", "--source", "-d", source, "get-volume"]
+    ).strip())
+    muted = subprocess.call(["ponymix", "--source", "-d", source, "is-muted"]) == 0
+    updates = {
+        "mic_volume:"+source: volume,
+        "mic_muted:"+source: muted
+    }
+
+    # FIXME: Don't assume only one sink
+    updates["mic_volume"] = volume
+    updates["mic_muted"] = muted
+    return updates
+
+def _get_updates_for_sink(sink):
+    volume = int(subprocess.check_output(
+        ["ponymix", "--sink", "-d", sink, "get-volume"]
+    ).strip())
+    muted = subprocess.call(["ponymix", "--sink", "-d", sink, "is-muted"]) == 0
+    updates = {
+        "volume:"+sink: volume,
+        "muted:"+sink: muted
+    }
+
+    # FIXME: Don't assume only one sink
+    updates["volume"] = volume
+    updates["muted"] = muted
+    return updates
+
+def _get_sink_updates():
+    playing_proc = subprocess.Popen(["pactl", "list", "short", "sinks"], stdout=subprocess.PIPE)
+    updates = {}
+    sinks = set()
+    updates = {}
+    for line in playing_proc.stdout:
+        pieces = line[:-1].decode('utf-8').split('\t')
+        updates["playing:"+pieces[0]] = (pieces[4] == "RUNNING")
+        sinks.add(pieces[0])
+    updates["playing"] = any(updates.values())
+    updates["sinks"] = sinks
+    playing_proc.wait(1) # Close process.
+    return updates
+
+def _get_source_updates():
+    recording_proc = subprocess.Popen(["pactl", "list", "short", "sources"], stdout=subprocess.PIPE)
+    updates = {}
+    sources = set()
+    updates = {}
+    for line in recording_proc.stdout:
+        pieces = line[:-1].decode('utf-8').split('\t')
+        updates["recording:"+pieces[0]] = (pieces[4] == "RUNNING")
+        sources.add(pieces[0])
+    updates["recording"] = any(updates.values())
+    updates["sources"] = sources
+    recording_proc.wait(1) # Close process.
+    return updates
+
+
 class PulseaudioSource(Source, PipeSink):
-    matcher = re.compile(r"^Event '(new|remove|change)' on sink #([0-9]+)$")
     cmd = ["pactl", "subscribe"]
     restart = True
     def __init__(self):
@@ -29,64 +109,34 @@ class PulseaudioSource(Source, PipeSink):
 
     def is_publishing(self, subscription):
         try:
-            if subscription in ("volume", "muted", "sinks", "playing"):
+            if subscription in ("mic_volume", "mic_muted", "volume", "muted", "sinks", "playing", "sources", "recording"):
                 return True
             if not (hasattr(subscription, "__getitem__") and len(subscription) == 2):
                 return False
             if subscription[0] in ("volume", "muted", "playing"):
-                dev = subscription[1]
-            else:
-                return False
-            return dev in self.get('sinks', ())
+                return subscription[1] in self.get('sinks', ())
+            if subscription[0] in ("mic_volume", "mic_muted", "recording"):
+                return subscription[1] in self.get('sources', ())
+            return False
         except:
             return False
 
     def handle_input(self, line):
-        match = self.matcher.match(line)
-        if not match:
-            return
-        event, sink = match.groups()
-        updates = self._get_sink_updates()
-        updates.update(self._get_updates_for_sink(sink))
-
-        self.push_updates(updates)
-
+        updates = {}
+        updates.update(_process_sinks(line))
+        updates.update(_process_sources(line))
+        if updates:
+            self.push_updates(updates)
 
     def on_start(self):
         self.published_data.update(self._get_all())
 
-    def _get_sink_updates(self):
-        playing_proc = subprocess.Popen(["pactl", "list", "short", "sinks"], stdout=subprocess.PIPE)
-        updates = {}
-        sinks = set()
-        updates = {}
-        for line in playing_proc.stdout:
-            pieces = line[:-1].decode('utf-8').split('\t')
-            updates["playing:"+pieces[0]] = (pieces[4] == "RUNNING")
-            sinks.add(pieces[0])
-        updates["playing"] = any(updates.values())
-        updates["sinks"] = sinks
-        playing_proc.wait(1) # Close process.
-        return updates
-
     def _get_all(self):
-        updates = self._get_sink_updates()
-        updates.update(*(self._get_updates_for_sink(s) for s in updates["sinks"]))
+        updates = {}
+        updates.update(_get_sink_updates())
+        updates.update(_get_source_updates())
+        for s in updates["sinks"]:
+            updates.update(_get_updates_for_sink(s))
+        for s in updates["sources"]:
+            updates.update(_get_updates_for_source(s))
         return updates
-
-    def _get_updates_for_sink(self, sink):
-        volume = int(subprocess.check_output(
-            ["ponymix", "--sink", "-d", sink, "get-volume"]
-        ).strip())
-        muted = subprocess.call(["ponymix", "--sink", "-d", sink, "is-muted"]) == 0
-        updates = {
-            "volume:"+sink: volume,
-            "muted:"+sink: muted
-        }
-
-        # FIXME: Don't assume only one sink
-        updates["volume"] = volume
-        updates["muted"] = muted
-        return updates
-
-
