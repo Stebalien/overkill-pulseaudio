@@ -30,7 +30,9 @@ def _process_sinks(line):
         return {}
     event, sink = match.groups()
     updates = _get_sink_updates()
-    updates.update(_get_updates_for_sink(sink))
+    sink_update = _get_updates_for_sink(sink)
+    if sink_update is not None:
+        updates.update(sink_update)
     return updates
 
 def _process_sources(line):
@@ -39,14 +41,20 @@ def _process_sources(line):
         return {}
     event, source = match.groups()
     updates = _get_source_updates()
-    updates.update(_get_updates_for_source(source))
+    source_update = _get_updates_for_source(source)
+    if source_update is not None:
+        updates.update(source_update)
     return updates
 
 def _get_updates_for_source(source):
-    volume = int(subprocess.check_output(
-        ["ponymix", "--source", "-d", source, "get-volume"]
-    ).strip())
-    muted = subprocess.call(["ponymix", "--source", "-d", source, "is-muted"]) == 0
+    try:
+        volume = int(subprocess.check_output(
+            ["ponymix", "--source", "-d", source, "get-volume"]
+        ).strip())
+        muted = subprocess.call(["ponymix", "--source", "-d", source, "is-muted"]) == 0
+    except subprocess.CalledProcessError:
+        return None
+
     updates = {
         "mic_volume:"+source: volume,
         "mic_muted:"+source: muted
@@ -58,10 +66,14 @@ def _get_updates_for_source(source):
     return updates
 
 def _get_updates_for_sink(sink):
-    volume = int(subprocess.check_output(
-        ["ponymix", "--sink", "-d", sink, "get-volume"]
-    ).strip())
-    muted = subprocess.call(["ponymix", "--sink", "-d", sink, "is-muted"]) == 0
+    try:
+        volume = int(subprocess.check_output(
+            ["ponymix", "--sink", "-d", sink, "get-volume"]
+        ).strip())
+        muted = subprocess.call(["ponymix", "--sink", "-d", sink, "is-muted"]) == 0
+    except subprocess.CalledProcessError:
+        return None
+
     updates = {
         "volume:"+sink: volume,
         "muted:"+sink: muted
@@ -136,7 +148,12 @@ class PulseaudioSource(Source, PipeSink):
         updates.update(_get_sink_updates())
         updates.update(_get_source_updates())
         for s in updates["sinks"]:
-            updates.update(_get_updates_for_sink(s))
+            update = _get_updates_for_sink(s)
+            updates.update()
+            if update is not None:
+                updates.update(update)
         for s in updates["sources"]:
-            updates.update(_get_updates_for_source(s))
+            update = _get_updates_for_source(s)
+            if update is not None:
+                updates.update(update)
         return updates
